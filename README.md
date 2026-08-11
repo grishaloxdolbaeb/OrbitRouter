@@ -1,34 +1,108 @@
-# Orbit Router – A Programmable Gateway for AI Workflows
-Orbit is a free, cloud-routed networking tool built for one thing: seamless programmatic access to AI services via your Kiro AI and ChatGPT accounts.
+# Orbit Router
 
-It is not a consumer mesh router. It does not care about your Netflix stream or your ping in Valorant.
+Небольшой OpenAI-совместимый AI-роутер для Render. Он принимает ключи, выданные друзьям, ограничивает частоту запросов и переключается между эквивалентными моделями разных провайдеров.
 
-Orbit is a thin routing layer that sits between your code and the AI endpoints you rely on. Instead of managing API keys and connection logic manually inside every script, Orbit centralizes routing, authentication, and session handling for your AI agents.
+## Возможности
 
-How It Works
-You connect your Kiro AI and OpenAI (ChatGPT) accounts to Orbit.
+- `POST /v1/chat/completions` с обычными и потоковыми ответами.
+- `GET /v1/models` со списком доступных моделей.
+- Bearer-авторизация ключами `rtr_...`.
+- Индивидуальные ограничения RPM и доступных моделей.
+- Явный fallback только между эквивалентными моделями.
+- Dashboard со статистикой в памяти: `/dashboard`.
+- Ключи провайдеров хранятся только в Render Environment.
 
-The router exposes a unified, lightweight interface (REST / WebSocket) for your local development environment.
+## Переменные Render
 
-Orbit handles the underlying routing — not locally, but via a lightweight cloud coordination layer. This keeps your dev machine clean and your credentials out of your source code.
+Обязательные:
 
-What Orbit Actually Does
-Account Aggregation – Use multiple AI accounts (Kiro, ChatGPT, or custom OpenAI-compatible endpoints) from a single access point.
+```text
+ADMIN_KEY=длинный-случайный-пароль
+ROUTER_API_KEYS=rtr_ключ_для_тебя,rtr_ключ_для_друга
+```
 
-Credential Isolation – API keys live inside Orbit’s secure session storage, not in your .env files.
+Добавь хотя бы один ключ провайдера:
 
-Stateless Routing – Each request is tagged with your preferred AI provider and routed accordingly.
+```text
+FISHAPPEDU_API_KEY=sk-cxr-...
+OPENROUTER_API_KEY=sk-or-v1-...
+```
 
-No Vendor Lock-in – Switch between Kiro and ChatGPT without rewriting your code. Just change a header or a query param.
+Для разных лимитов используй `ROUTER_KEYS_JSON` вместо `ROUTER_API_KEYS`:
 
-Who Is It For
-Developers experimenting with AI agents
+```json
+[
+  {
+    "name": "owner",
+    "key": "rtr_очень-длинный-случайный-ключ",
+    "rpm": 100
+  },
+  {
+    "name": "friend",
+    "key": "rtr_другой-длинный-ключ",
+    "rpm": 20,
+    "models": ["orbit-auto", "gpt-5.5"]
+  }
+]
+```
 
-Hackathon participants who need quick multi-provider access
+Если заданы обе переменные, используется `ROUTER_KEYS_JSON`.
 
-Anyone tired of copying API keys between projects
+## Деплой
 
-Important Note
-Orbit is not a local omniroute. It uses a cloud-assisted routing backend to keep the router lightweight and account-agnostic. Your data is not logged or stored — only transiently forwarded.
+1. Отправь файлы в GitHub.
+2. В Render выбери `New` → `Blueprint` и подключи репозиторий.
+3. Введи секретные `FISHAPPEDU_API_KEY` и/или `OPENROUTER_API_KEY`.
+4. После деплоя открой `https://имя-сервиса.onrender.com/health`.
+5. Открой `/dashboard` и введи значение `ADMIN_KEY`.
 
-Orbit Router – code once, route to any AI.
+`render.yaml` автоматически создаёт случайные `ADMIN_KEY` и `ROUTER_API_KEYS`. Значение сгенерированного `ROUTER_API_KEYS` можно посмотреть и заменить в Environment сервиса.
+
+## Использование
+
+```bash
+curl https://имя-сервиса.onrender.com/v1/chat/completions \
+  -H "Authorization: Bearer rtr_твой-ключ" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "orbit-auto",
+    "messages": [{"role":"user","content":"Привет!"}],
+    "stream": false
+  }'
+```
+
+Поддерживаемые публичные ID зависят от настроенных провайдеров. Получить фактический список:
+
+```bash
+curl https://имя-сервиса.onrender.com/v1/models \
+  -H "Authorization: Bearer rtr_твой-ключ"
+```
+
+`orbit-auto` сначала использует `gpt-5.6-sol` Fishappedu, затем эквивалентную `openai/gpt-5.6-sol` OpenRouter.
+
+## Безопасность
+
+- Никогда не добавляй `.env` или реальные ключи в GitHub.
+- Для каждого друга лучше создать отдельную запись в `ROUTER_KEYS_JSON`.
+- При утечке удали ключ из переменной и перезапусти сервис.
+- `CORS_ORIGINS=*` подходит для личного API. Позже замени `*` на домен своего чата.
+- Бесплатный Render перезапускается и засыпает, поэтому статистика в dashboard непостоянная.
+
+## Локальный запуск
+
+```bash
+npm install
+copy .env.example .env
+npm start
+```
+
+API будет доступен на `http://localhost:3000`.
+
+## OmniRoute
+
+`localhost:20128` на твоём компьютере недоступен серверу Render. OmniRoute можно подключить только если он запущен по публичному HTTPS URL. Тогда установи:
+
+```text
+OMNIROUTE_BASE_URL=https://твой-публичный-omniroute.example/v1
+OMNIROUTE_API_KEY=...
+```

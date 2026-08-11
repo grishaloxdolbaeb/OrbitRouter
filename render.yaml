@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: orbit-router
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: ADMIN_KEY
+        generateValue: true
+      - key: ROUTER_API_KEYS
+        generateValue: true
+      - key: FISHAPPEDU_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        value: "*"
