@@ -28,6 +28,10 @@
     .btn-danger { background: #d32f2f; }
     .btn-danger:hover { background: #b71c1c; }
     .btn-sm { padding: 6px 12px; font-size: 12px; }
+    .btn-oauth { display: inline-flex; align-items: center; gap: 8px; padding: 12px 20px; background: #292e3b; color: #fff; border: 1px solid #343a49; border-radius: 8px; cursor: pointer; font-weight: 500; text-decoration: none; }
+    .btn-oauth:hover { background: #343a49; border-color: #7656ff; }
+    .oauth-buttons { display: flex; gap: 12px; flex-wrap: wrap; }
+    .connected-badge { display: inline-flex; align-items: center; gap: 6px; }
     input, select { padding: 10px 14px; background: #101218; border: 1px solid #343a49; border-radius: 8px; color: #fff; font-size: 14px; width: 100%; }
     input:focus, select:focus { outline: none; border-color: #7656ff; }
     .form-group { margin-bottom: 15px; }
@@ -106,7 +110,15 @@
 
     <div class="tab-content" id="accountsTab">
       <div class="card">
-        <h2>Подключить аккаунт</h2>
+        <h2>Быстрое подключение (OAuth)</h2>
+        <p style="color:#929aaa;margin-bottom:15px">Подключите аккаунт через официальный сайт — без ввода API ключа</p>
+        <div class="oauth-buttons">
+          <a href="/auth/kiro" class="btn btn-oauth">🔗 Подключить Kiro AI</a>
+          <a href="/auth/openai" class="btn btn-oauth">🔗 Подключить ChatGPT</a>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Подключить вручную</h2>
         <p style="color:#929aaa;margin-bottom:15px">Добавьте API ключ от вашего аккаунта, чтобы использовать его для запросов</p>
         <div class="form-row">
           <div class="form-group" style="flex:1">
@@ -233,6 +245,12 @@
     async function toggleKey(id) { await fetch('/api/keys/' + id + '/toggle', { method: 'PUT' }); loadKeys(); }
     async function deleteKey(id) { if (!confirm('Удалить ключ?')) return; await fetch('/api/keys/' + id, { method: 'DELETE' }); loadKeys(); }
     async function loadAccounts() {
+      const urlParams = new URLSearchParams(window.location.search);
+      const connected = urlParams.get('connected');
+      const error = urlParams.get('error');
+      if (connected) showToast(`✅ ${connected === 'kiro' ? 'Kiro AI' : 'ChatGPT'} подключён!`);
+      if (error) showToast('❌ Ошибка подключения', true);
+      
       const res = await fetch('/api/accounts');
       const accounts = await res.json();
       const list = document.getElementById('accountsList');
@@ -241,8 +259,8 @@
       list.innerHTML = accounts.map(acc => `
         <div class="account-item">
           <div class="account-info">
-            <div class="account-provider">${providerNames[acc.provider] || acc.provider} ${acc.is_active ? '<span class="badge badge-success">Активен</span>' : '<span class="badge badge-error">Отключен</span>'}</div>
-            <div class="account-status">Подключено: ${new Date(acc.created_at).toLocaleDateString()}</div>
+            <div class="account-provider">${providerNames[acc.provider] || acc.provider} ${acc.is_active ? '<span class="badge badge-success connected-badge">● Подключён</span>' : '<span class="badge badge-error">Отключен</span>'}</div>
+            <div class="account-status">Подключено: ${new Date(acc.created_at).toLocaleDateString()}${acc.refresh_token ? ' (OAuth)' : ''}</div>
           </div>
           <div class="account-actions">
             <button class="btn btn-secondary btn-sm" onclick="toggleAccount('${acc.provider}')">${acc.is_active ? 'Отключить' : 'Включить'}</button>

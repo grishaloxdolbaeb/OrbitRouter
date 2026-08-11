@@ -5,6 +5,8 @@ const fs = require('fs');
 const crypto = require('node:crypto');
 const express = require('express');
 const session = require('express-session');
+const passport = require('passport');
+const OAuth2Strategy = require('passport-oauth2').Strategy;
 const low = require('lowdb');
 const FileSync = require('lowdb/adapters/FileSync');
 
@@ -23,7 +25,8 @@ db.defaults({
   users: [],
   api_keys: [],
   connected_accounts: [],
-  usage_stats: []
+  usage_stats: [],
+  oauth_states: []
 }).write();
 
 function getNextId(collection) {
@@ -53,12 +56,14 @@ app.use(session({
   resave: false,
   saveUninitialized: false,
   cookie: {
-    secure: true,
+    secure: process.env.NODE_ENV === 'production',
     httpOnly: true,
     maxAge: 30 * 24 * 60 * 60 * 1000,
     sameSite: 'lax'
   }
 }));
+
+app.use(passport.initialize());
 
 // Helper functions
 function generateApiKey() {
@@ -88,25 +93,26 @@ function getProviderConfig(userId) {
   const providers = [];
   
   for (const account of accounts) {
+    const key = account.api_key;
     switch (account.provider) {
       case 'openai':
-        providers.push({ id: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: account.api_key, models: ['gpt-4o', 'gpt-4o-mini', 'gpt-3.5-turbo', 'gpt-4', 'gpt-4-turbo'] });
+        providers.push({ id: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: key, models: ['gpt-4o', 'gpt-4o-mini', 'gpt-3.5-turbo', 'gpt-4', 'gpt-4-turbo'] });
         break;
       case 'openrouter':
         providers.push({
-          id: 'openrouter', baseUrl: 'https://openrouter.ai/api/v1', apiKey: account.api_key,
+          id: 'openrouter', baseUrl: 'https://openrouter.ai/api/v1', apiKey: key,
           models: ['openai/gpt-oss-120b', 'openai/gpt-5.6-luna-pro', 'openai/gpt-5.6-sol', 'anthropic/claude-fable-5', 'anthropic/claude-sonnet-5', 'anthropic/claude-3.5-sonnet', 'google/gemini-2.0-flash-001'],
           headers: { 'HTTP-Referer': BASE_URL, 'X-Title': 'Orbit Router' }
         });
         break;
       case 'fishappedu':
-        providers.push({ id: 'fishappedu', baseUrl: 'https://fishappedu.online/v1', apiKey: account.api_key, models: ['gpt-5.6-sol', 'gpt-5.5'] });
+        providers.push({ id: 'fishappedu', baseUrl: 'https://fishappedu.online/v1', apiKey: key, models: ['gpt-5.6-sol', 'gpt-5.5'] });
         break;
       case 'kiro':
-        providers.push({ id: 'kiro', baseUrl: process.env.KIRO_BASE_URL || 'https://api.kiro.ai/v1', apiKey: account.api_key, models: process.env.KIRO_MODELS ? process.env.KIRO_MODELS.split(',') : ['kr/claude-sonnet-4.5', 'kr/gpt-4o'] });
+        providers.push({ id: 'kiro', baseUrl: process.env.KIRO_BASE_URL || 'https://api.kiro.ai/v1', apiKey: key, models: process.env.KIRO_MODELS ? process.env.KIRO_MODELS.split(',') : ['kr/claude-sonnet-4.5', 'kr/gpt-4o'] });
         break;
       case 'omniroute':
-        providers.push({ id: 'omniroute', baseUrl: process.env.OMNIROUTE_BASE_URL || 'http://localhost:20128/v1', apiKey: account.api_key, models: ['kr/claude-sonnet-4.5'] });
+        providers.push({ id: 'omniroute', baseUrl: process.env.OMNIROUTE_BASE_URL || 'http://localhost:20128/v1', apiKey: key, models: ['kr/claude-sonnet-4.5'] });
         break;
     }
   }
@@ -197,6 +203,160 @@ app.get('/auth/status', (req, res) => {
     }
   }
   res.json({ authenticated: false });
+});
+
+// OAuth routes for Kiro AI
+app.get('/auth/kiro', requireAuth, (req, res) => {
+  const state = crypto.randomBytes(32).toString('hex');
+  db.get('oauth_states').push({
+    id: getNextId('oauth_states'),
+    user_id: req.user.id,
+    provider: 'kiro',
+    state,
+    created_at: new Date().toISOString()
+  }).write();
+  
+  const params = new URLSearchParams({
+    client_id: process.env.KIRO_CLIENT_ID || '',
+    redirect_uri: `${BASE_URL}/auth/kiro/callback`,
+    response_type: 'code',
+    state,
+    scope: 'api_access'
+  });
+  
+  res.redirect(`https://kiro.ai/oauth/authorize?${params}`);
+});
+
+app.get('/auth/kiro/callback', requireAuth, async (req, res) => {
+  const { code, state } = req.query;
+  
+  const storedState = db.get('oauth_states').find({ state, user_id: req.user.id, provider: 'kiro' }).value();
+  if (!storedState) {
+    return res.redirect('/dashboard?error=invalid_state');
+  }
+  
+  db.get('oauth_states').remove({ id: storedState.id }).write();
+  
+  try {
+    const tokenRes = await fetch('https://kiro.ai/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: process.env.KIRO_CLIENT_ID,
+        client_secret: process.env.KIRO_CLIENT_SECRET,
+        code,
+        redirect_uri: `${BASE_URL}/auth/kiro/callback`,
+        grant_type: 'authorization_code'
+      })
+    });
+    
+    const tokenData = await tokenRes.json();
+    
+    if (tokenData.access_token) {
+      const existing = db.get('connected_accounts').find({ user_id: req.user.id, provider: 'kiro' }).value();
+      if (existing) {
+        db.get('connected_accounts').find({ user_id: req.user.id, provider: 'kiro' }).assign({
+          api_key: tokenData.access_token,
+          refresh_token: tokenData.refresh_token,
+          is_active: true,
+          updated_at: new Date().toISOString()
+        }).write();
+      } else {
+        db.get('connected_accounts').push({
+          id: getNextId('connected_accounts'),
+          user_id: req.user.id,
+          provider: 'kiro',
+          api_key: tokenData.access_token,
+          refresh_token: tokenData.refresh_token,
+          is_active: true,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        }).write();
+      }
+      res.redirect('/dashboard?connected=kiro');
+    } else {
+      res.redirect('/dashboard?error=kiro_auth_failed');
+    }
+  } catch (error) {
+    res.redirect('/dashboard?error=kiro_auth_failed');
+  }
+});
+
+// OAuth routes for ChatGPT (OpenAI)
+app.get('/auth/openai', requireAuth, (req, res) => {
+  const state = crypto.randomBytes(32).toString('hex');
+  db.get('oauth_states').push({
+    id: getNextId('oauth_states'),
+    user_id: req.user.id,
+    provider: 'openai',
+    state,
+    created_at: new Date().toISOString()
+  }).write();
+  
+  const params = new URLSearchParams({
+    client_id: process.env.OPENAI_CLIENT_ID || '',
+    redirect_uri: `${BASE_URL}/auth/openai/callback`,
+    response_type: 'code',
+    state,
+    scope: 'openid email profile'
+  });
+  
+  res.redirect(`https://auth.openai.com/oauth/authorize?${params}`);
+});
+
+app.get('/auth/openai/callback', requireAuth, async (req, res) => {
+  const { code, state } = req.query;
+  
+  const storedState = db.get('oauth_states').find({ state, user_id: req.user.id, provider: 'openai' }).value();
+  if (!storedState) {
+    return res.redirect('/dashboard?error=invalid_state');
+  }
+  
+  db.get('oauth_states').remove({ id: storedState.id }).write();
+  
+  try {
+    const tokenRes = await fetch('https://auth.openai.com/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: process.env.OPENAI_CLIENT_ID,
+        client_secret: process.env.OPENAI_CLIENT_SECRET,
+        code,
+        redirect_uri: `${BASE_URL}/auth/openai/callback`,
+        grant_type: 'authorization_code'
+      })
+    });
+    
+    const tokenData = await tokenRes.json();
+    
+    if (tokenData.access_token) {
+      const existing = db.get('connected_accounts').find({ user_id: req.user.id, provider: 'openai' }).value();
+      if (existing) {
+        db.get('connected_accounts').find({ user_id: req.user.id, provider: 'openai' }).assign({
+          api_key: tokenData.access_token,
+          refresh_token: tokenData.refresh_token,
+          is_active: true,
+          updated_at: new Date().toISOString()
+        }).write();
+      } else {
+        db.get('connected_accounts').push({
+          id: getNextId('connected_accounts'),
+          user_id: req.user.id,
+          provider: 'openai',
+          api_key: tokenData.access_token,
+          refresh_token: tokenData.refresh_token,
+          is_active: true,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        }).write();
+      }
+      res.redirect('/dashboard?connected=openai');
+    } else {
+      res.redirect('/dashboard?error=openai_auth_failed');
+    }
+  } catch (error) {
+    res.redirect('/dashboard?error=openai_auth_failed');
+  }
 });
 
 // Pages
