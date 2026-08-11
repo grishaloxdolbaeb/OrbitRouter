@@ -49,6 +49,21 @@
     .toast { position: fixed; bottom: 20px; right: 20px; padding: 12px 20px; background: #7656ff; color: #fff; border-radius: 8px; display: none; z-index: 1000; }
     .toast.show { display: block; }
     .toast.error { background: #d32f2f; }
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: none; place-items: center; z-index: 2000; }
+    .modal-overlay.show { display: grid; }
+    .modal { background: #171a22; border: 1px solid #292e3b; border-radius: 20px; padding: 40px; max-width: 600px; width: 90%; max-height: 90vh; overflow-y: auto; position: relative; }
+    .modal-close { position: absolute; top: 15px; right: 20px; background: none; border: none; color: #929aaa; font-size: 28px; cursor: pointer; line-height: 1; }
+    .modal-close:hover { color: #fff; }
+    .modal h3 { margin-bottom: 15px; font-size: 22px; }
+    .key-display { background: #101218; border: 2px solid #7656ff; border-radius: 12px; padding: 20px; margin-bottom: 20px; word-break: break-all; font-family: monospace; font-size: 14px; line-height: 1.6; user-select: all; }
+    .modal-actions { display: flex; gap: 10px; margin-bottom: 20px; }
+    .warning { background: #3e2723; border: 1px solid #ff6b6b; border-radius: 8px; padding: 12px 15px; margin-bottom: 20px; font-size: 13px; color: #ffab91; }
+    .security-notice { background: #1a1a2e; border: 1px solid #3a3a5a; border-radius: 12px; padding: 20px; font-size: 13px; line-height: 1.7; }
+    .security-notice h4 { margin-bottom: 12px; font-size: 15px; color: #ff9800; }
+    .security-notice ul { margin-left: 20px; margin-bottom: 12px; }
+    .security-notice li { margin-bottom: 8px; color: #b0b0b0; }
+    .security-notice .danger { color: #ff5252; font-weight: 600; }
+    .security-notice .recommendation { color: #81c784; margin-top: 12px; font-style: italic; }
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; padding: 10px; border-bottom: 1px solid #292e3b; }
     th { color: #929aaa; font-weight: 500; font-size: 12px; }
@@ -133,6 +148,29 @@
     </div>
   </div>
   <div class="toast" id="toast"></div>
+  <div class="modal-overlay" id="keyModal">
+    <div class="modal">
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+      <h3>🔑 Your API Key Has Been Generated</h3>
+      <div class="warning">⚠️ This key is shown only once — immediately after generation. Make sure to copy and save it in a secure location.</div>
+      <div class="key-display" id="modalKeyValue"></div>
+      <div class="modal-actions">
+        <button class="btn" onclick="copyKey()">📋 Copy to Clipboard</button>
+      </div>
+      <div class="security-notice">
+        <h4>🔐 Important Security Notice</h4>
+        <p>This API key grants access to your account and should be treated with the same level of security as a password.</p>
+        <ul>
+          <li>The key is shown only once — immediately after generation</li>
+          <li>Make sure to copy and save it in a secure location (e.g., password manager)</li>
+          <li>If you lose it, you cannot retrieve it — you'll need to generate a new one</li>
+          <li>Revoking the previous key will break any integrations using it</li>
+        </ul>
+        <p class="danger">⚠️ Never expose this key in client-side code, public repositories, or logs.</p>
+        <p class="recommendation">We recommend rotating your keys periodically for enhanced security.</p>
+      </div>
+    </div>
+  </div>
   <script>
     let currentUser = null;
     async function checkAuth() {
@@ -175,8 +213,22 @@
       if (!name) return showToast('Введите название ключа');
       const res = await fetch('/api/keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
       const data = await res.json();
-      if (data.key) { showToast('Ключ создан: ' + data.key); document.getElementById('keyName').value = ''; loadKeys(); }
-      else { showToast('Ошибка: ' + (data.error || 'Unknown'), true); }
+      if (data.key) {
+        document.getElementById('modalKeyValue').textContent = data.key;
+        document.getElementById('keyModal').classList.add('show');
+        document.getElementById('keyName').value = '';
+        loadKeys();
+      } else {
+        showToast('Ошибка: ' + (data.error || 'Unknown'), true);
+      }
+    }
+    function copyKey() {
+      const key = document.getElementById('modalKeyValue').textContent;
+      navigator.clipboard.writeText(key);
+      showToast('Ключ скопирован!');
+    }
+    function closeModal() {
+      document.getElementById('keyModal').classList.remove('show');
     }
     async function toggleKey(id) { await fetch('/api/keys/' + id + '/toggle', { method: 'PUT' }); loadKeys(); }
     async function deleteKey(id) { if (!confirm('Удалить ключ?')) return; await fetch('/api/keys/' + id, { method: 'DELETE' }); loadKeys(); }
