@@ -4,4 +4,8 @@ node_modules/
 *.log
 .DS_Store
 data/
+<<<<<<< HEAD
 db.json
+=======
+db.json
+>>>>>>> de7d85d (Remove data/db.json from tracking and add to gitignore)
