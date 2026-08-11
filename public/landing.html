@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Orbit Router - AI Router для всех</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font: 16px/1.6 system-ui, -apple-system, sans-serif; background: #0d0f14; color: #eef0f6; min-height: 100vh; }
+    .container { max-width: 900px; margin: 0 auto; padding: 40px 20px; }
+    .hero { text-align: center; padding: 40px 0; }
+    .hero h1 { font-size: 48px; margin-bottom: 20px; }
+    .hero h1 span { color: #7656ff; }
+    .hero p { font-size: 18px; color: #929aaa; max-width: 600px; margin: 0 auto 30px; }
+    .auth-box { max-width: 400px; margin: 0 auto; background: #171a22; border: 1px solid #292e3b; border-radius: 16px; padding: 30px; }
+    .tabs { display: flex; gap: 10px; margin-bottom: 20px; }
+    .tab { flex: 1; padding: 10px; background: #101218; border: 1px solid #292e3b; border-radius: 8px; color: #929aaa; cursor: pointer; text-align: center; }
+    .tab.active { background: #7656ff; color: #fff; border-color: #7656ff; }
+    .form-group { margin-bottom: 15px; }
+    .form-group label { display: block; margin-bottom: 5px; color: #929aaa; font-size: 13px; }
+    .form-group input { width: 100%; padding: 12px; background: #101218; border: 1px solid #343a49; border-radius: 8px; color: #fff; font-size: 14px; }
+    .form-group input:focus { outline: none; border-color: #7656ff; }
+    .btn { width: 100%; padding: 12px; background: #7656ff; color: #fff; border: none; border-radius: 8px; font-size: 16px; font-weight: 500; cursor: pointer; }
+    .btn:hover { background: #5a3ce8; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .error { color: #ff7180; font-size: 13px; margin-top: 10px; }
+    .success { color: #4caf50; font-size: 13px; margin-top: 10px; }
+    .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 24px; margin-top: 50px; }
+    .feature { background: #171a22; border: 1px solid #292e3b; border-radius: 12px; padding: 24px; }
+    .feature h3 { margin-bottom: 10px; font-size: 18px; }
+    .feature p { color: #929aaa; font-size: 14px; }
+    .providers { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-top: 30px; }
+    .provider { background: #171a22; border: 1px solid #292e3b; border-radius: 8px; padding: 8px 16px; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="hero">
+      <h1>Orbit<span>Router</span></h1>
+      <p>Подключи свои аккаунты Kiro AI и ChatGPT, создавай ключи для друзей и используй AI без ограничений</p>
+    </div>
+
+    <div class="auth-box">
+      <div class="tabs">
+        <div class="tab active" onclick="switchTab('login')">Вход</div>
+        <div class="tab" onclick="switchTab('register')">Регистрация</div>
+      </div>
+      
+      <form id="loginForm" onsubmit="return login(event)">
+        <div class="form-group">
+          <label>Email</label>
+          <input type="email" id="loginEmail" required placeholder="your@email.com">
+        </div>
+        <div class="form-group">
+          <label>Пароль</label>
+          <input type="password" id="loginPassword" required placeholder="Ваш пароль">
+        </div>
+        <button type="submit" class="btn" id="loginBtn">Войти</button>
+        <div class="error" id="loginError"></div>
+      </form>
+      
+      <form id="registerForm" style="display:none" onsubmit="return register(event)">
+        <div class="form-group">
+          <label>Имя (необязательно)</label>
+          <input type="text" id="regName" placeholder="Как вас зовут">
+        </div>
+        <div class="form-group">
+          <label>Email</label>
+          <input type="email" id="regEmail" required placeholder="your@email.com">
+        </div>
+        <div class="form-group">
+          <label>Пароль</label>
+          <input type="password" id="regPassword" required minlength="6" placeholder="Минимум 6 символов">
+        </div>
+        <button type="submit" class="btn" id="regBtn">Зарегистрироваться</button>
+        <div class="error" id="regError"></div>
+        <div class="success" id="regSuccess"></div>
+      </form>
+    </div>
+
+    <div class="features">
+      <div class="feature">
+        <h3>🔑 Управление ключами</h3>
+        <p>Создавай API ключи для друзей и контролируй доступ к своим аккаунтам</p>
+      </div>
+      <div class="feature">
+        <h3>🔗 Подключение аккаунтов</h3>
+        <p>Подключай Kiro AI, ChatGPT, OpenRouter и другие провайдеры</p>
+      </div>
+      <div class="feature">
+        <h3>📊 Статистика</h3>
+        <p>Отслеживай использование токенов и запросов в реальном времени</p>
+      </div>
+    </div>
+
+    <div class="providers">
+      <span class="provider">Kiro AI</span>
+      <span class="provider">ChatGPT</span>
+      <span class="provider">OpenRouter</span>
+      <span class="provider">Fishappedu</span>
+      <span class="provider">OmniRoute</span>
+    </div>
+  </div>
+
+  <script>
+    function switchTab(tab) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      event.target.classList.add('active');
+      if (tab === 'login') {
+        document.getElementById('loginForm').style.display = 'block';
+        document.getElementById('registerForm').style.display = 'none';
+      } else {
+        document.getElementById('loginForm').style.display = 'none';
+        document.getElementById('registerForm').style.display = 'block';
+      }
+    }
+    
+    async function login(e) {
+      e.preventDefault();
+      const btn = document.getElementById('loginBtn');
+      const error = document.getElementById('loginError');
+      btn.disabled = true;
+      error.textContent = '';
+      
+      try {
+        const res = await fetch('/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: document.getElementById('loginEmail').value,
+            password: document.getElementById('loginPassword').value
+          })
+        });
+        const data = await res.json();
+        if (data.success) {
+          window.location.href = '/dashboard';
+        } else {
+          error.textContent = data.error || 'Ошибка входа';
+        }
+      } catch (err) {
+        error.textContent = 'Ошибка сети';
+      } finally {
+        btn.disabled = false;
+      }
+      return false;
+    }
+    
+    async function register(e) {
+      e.preventDefault();
+      const btn = document.getElementById('regBtn');
+      const error = document.getElementById('regError');
+      const success = document.getElementById('regSuccess');
+      btn.disabled = true;
+      error.textContent = '';
+      success.textContent = '';
+      
+      try {
+        const res = await fetch('/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: document.getElementById('regEmail').value,
+            password: document.getElementById('regPassword').value,
+            name: document.getElementById('regName').value
+          })
+        });
+        const data = await res.json();
+        if (data.success) {
+          success.textContent = 'Регистрация успешна! Перенаправляем...';
+          setTimeout(() => window.location.href = '/dashboard', 1000);
+        } else {
+          error.textContent = data.error || 'Ошибка регистрации';
+        }
+      } catch (err) {
+        error.textContent = 'Ошибка сети';
+      } finally {
+        btn.disabled = false;
+      }
+      return false;
+    }
+  </script>
+</body>
+</html>

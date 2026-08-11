@@ -1,108 +1,80 @@
 # Orbit Router
 
-Небольшой OpenAI-совместимый AI-роутер для Render. Он принимает ключи, выданные друзьям, ограничивает частоту запросов и переключается между эквивалентными моделями разных провайдеров.
+AI Router с регистрацией по email, подключением аккаунтов Kiro AI / ChatGPT и управлением API ключами.
 
 ## Возможности
 
-- `POST /v1/chat/completions` с обычными и потоковыми ответами.
-- `GET /v1/models` со списком доступных моделей.
-- Bearer-авторизация ключами `rtr_...`.
-- Индивидуальные ограничения RPM и доступных моделей.
-- Явный fallback только между эквивалентными моделями.
-- Dashboard со статистикой в памяти: `/dashboard`.
-- Ключи провайдеров хранятся только в Render Environment.
+- **Регистрация по email** — простой вход без Google
+- **Подключение аккаунтов** — Kiro AI, ChatGPT, OpenRouter, Fishappedu, OmniRoute
+- **Управление API ключами** — создание ключей для друзей
+- **Статистика** — запросы, токены, задержка
+- **Проксирование** — использует подключённые аккаунты
+- **Стриминг** — поддержка SSE
 
-## Переменные Render
+## Быстрый старт
 
-Обязательные:
+### 1. Деплой на Render
 
-```text
-ADMIN_KEY=длинный-случайный-пароль
-ROUTER_API_KEYS=rtr_ключ_для_тебя,rtr_ключ_для_друга
-```
+1. Залей код на GitHub
+2. На Render: **New** → **Web Service** → подключи GitHub
+3. Render автоматически создаст `SESSION_SECRET`
+4. Добавь `BASE_URL` (URL твоего приложения)
 
-Добавь хотя бы один ключ провайдера:
+### 2. Использование
 
-```text
-FISHAPPEDU_API_KEY=sk-cxr-...
-OPENROUTER_API_KEY=sk-or-v1-...
-```
+1. Открой сайт → **Регистрация**
+2. Введи email и пароль
+3. Перейди в **Подключённые аккаунты**
+4. Добавь API ключ от Kiro AI, ChatGPT или другого провайдера
+5. Создай ключ для друга в **Мои ключи**
 
-Для разных лимитов используй `ROUTER_KEYS_JSON` вместо `ROUTER_API_KEYS`:
-
-```json
-[
-  {
-    "name": "owner",
-    "key": "rtr_очень-длинный-случайный-ключ",
-    "rpm": 100
-  },
-  {
-    "name": "friend",
-    "key": "rtr_другой-длинный-ключ",
-    "rpm": 20,
-    "models": ["orbit-auto", "gpt-5.5"]
-  }
-]
-```
-
-Если заданы обе переменные, используется `ROUTER_KEYS_JSON`.
-
-## Деплой
-
-1. Отправь файлы в GitHub.
-2. В Render выбери `New` → `Blueprint` и подключи репозиторий.
-3. Введи секретные `FISHAPPEDU_API_KEY` и/или `OPENROUTER_API_KEY`.
-4. После деплоя открой `https://имя-сервиса.onrender.com/health`.
-5. Открой `/dashboard` и введи значение `ADMIN_KEY`.
-
-`render.yaml` автоматически создаёт случайные `ADMIN_KEY` и `ROUTER_API_KEYS`. Значение сгенерированного `ROUTER_API_KEYS` можно посмотреть и заменить в Environment сервиса.
-
-## Использование
+## API Usage
 
 ```bash
-curl https://имя-сервиса.onrender.com/v1/chat/completions \
-  -H "Authorization: Bearer rtr_твой-ключ" \
+curl https://your-app.onrender.com/v1/chat/completions \
+  -H "Authorization: Bearer rtr_ключ_друга" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "orbit-auto",
-    "messages": [{"role":"user","content":"Привет!"}],
-    "stream": false
+    "model": "kr/claude-sonnet-4.5",
+    "messages": [{"role": "user", "content": "Привет!"}]
   }'
 ```
 
-Поддерживаемые публичные ID зависят от настроенных провайдеров. Получить фактический список:
+## Провайдеры
 
-```bash
-curl https://имя-сервиса.onrender.com/v1/models \
-  -H "Authorization: Bearer rtr_твой-ключ"
-```
+| Провайер | ID | Модели |
+|----------|-----|--------|
+| ChatGPT | `openai` | gpt-4o, gpt-4o-mini, gpt-4, gpt-3.5-turbo |
+| Kiro AI | `kiro` | kr/claude-sonnet-4.5, kr/gpt-4o |
+| OpenRouter | `openrouter` | gpt-oss-120b, gpt-5.6-luna-pro, gpt-5.6-sol, claude-fable-5, claude-sonnet-5 |
+| Fishappedu | `fishappedu` | gpt-5.6-sol, gpt-5.5 |
+| OmniRoute | `omniroute` | kr/claude-sonnet-4.5 |
 
-`orbit-auto` сначала использует `gpt-5.6-sol` Fishappedu, затем эквивалентную `openai/gpt-5.6-sol` OpenRouter.
+## API Endpoints
 
-## Безопасность
-
-- Никогда не добавляй `.env` или реальные ключи в GitHub.
-- Для каждого друга лучше создать отдельную запись в `ROUTER_KEYS_JSON`.
-- При утечке удали ключ из переменной и перезапусти сервис.
-- `CORS_ORIGINS=*` подходит для личного API. Позже замени `*` на домен своего чата.
-- Бесплатный Render перезапускается и засыпает, поэтому статистика в dashboard непостоянная.
+| Метод | Путь | Описание |
+|-------|------|----------|
+| POST | `/auth/register` | Регистрация |
+| POST | `/auth/login` | Вход |
+| POST | `/auth/logout` | Выход |
+| GET | `/auth/status` | Статус |
+| GET | `/dashboard` | Панель управления |
+| GET/POST | `/api/keys` | Ключи |
+| GET/POST | `/api/accounts` | Аккаунты |
+| GET | `/api/models` | Модели |
+| GET | `/api/stats` | Статистика |
+| POST | `/v1/chat/completions` | Запрос к AI |
 
 ## Локальный запуск
 
 ```bash
 npm install
-copy .env.example .env
+cp .env.example .env
 npm start
 ```
 
-API будет доступен на `http://localhost:3000`.
+Открой `http://localhost:3000`
 
-## OmniRoute
+## Лицензия
 
-`localhost:20128` на твоём компьютере недоступен серверу Render. OmniRoute можно подключить только если он запущен по публичному HTTPS URL. Тогда установи:
-
-```text
-OMNIROUTE_BASE_URL=https://твой-публичный-omniroute.example/v1
-OMNIROUTE_API_KEY=...
-```
+MIT

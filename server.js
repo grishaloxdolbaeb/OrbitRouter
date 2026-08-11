@@ -1,368 +1,387 @@
 require('dotenv').config();
 
+const path = require('path');
+const fs = require('fs');
 const crypto = require('node:crypto');
 const express = require('express');
-const cors = require('cors');
+const session = require('express-session');
+const low = require('lowdb');
+const FileSync = require('lowdb/adapters/FileSync');
 
 const app = express();
-const port = Number(process.env.PORT || 3000);
-const startedAt = Date.now();
+const PORT = process.env.PORT || 3000;
+const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
-app.disable('x-powered-by');
+// Database setup
+const dataDir = path.join(__dirname, 'data');
+if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+
+const adapter = new FileSync(path.join(dataDir, 'db.json'));
+const db = low(adapter);
+
+db.defaults({
+  users: [],
+  api_keys: [],
+  connected_accounts: [],
+  usage_stats: []
+}).write();
+
+function getNextId(collection) {
+  const items = db.get(collection).value();
+  if (items.length === 0) return 1;
+  return Math.max(...items.map(i => i.id)) + 1;
+}
+
+// Password hashing
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
+  return { salt, hash };
+}
+
+function verifyPassword(password, salt, hash) {
+  const verifyHash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
+  return crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(verifyHash));
+}
+
+// Middleware
 app.use(express.json({ limit: '20mb' }));
+app.use(express.static(path.join(__dirname, 'public')));
 
-const allowedOrigins = (process.env.CORS_ORIGINS || '*')
-  .split(',')
-  .map((origin) => origin.trim())
-  .filter(Boolean);
-
-app.use(cors({
-  origin(origin, callback) {
-    if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-    return callback(new Error('Origin is not allowed by CORS'));
-  },
+app.use(session({
+  secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex'),
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    maxAge: 30 * 24 * 60 * 60 * 1000
+  }
 }));
 
-const providerDefinitions = [
-  {
-    id: 'fishappedu',
-    baseUrl: process.env.FISHAPPEDU_BASE_URL || 'https://fishappedu.online/v1',
-    apiKey: process.env.FISHAPPEDU_API_KEY,
-    models: ['gpt-5.6-sol', 'gpt-5.5'],
-  },
-  {
-    id: 'openrouter',
-    baseUrl: process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
-    apiKey: process.env.OPENROUTER_API_KEY,
-    models: [
-      'openai/gpt-oss-120b',
-      'openai/gpt-5.6-luna-pro',
-      'openai/gpt-5.6-sol',
-      'anthropic/claude-fable-5',
-      'anthropic/claude-sonnet-5',
-    ],
-    headers: {
-      'HTTP-Referer': process.env.PUBLIC_URL || 'https://orbit-router.onrender.com',
-      'X-Title': 'Orbit Router',
-    },
-  },
-  {
-    id: 'omniroute',
-    baseUrl: process.env.OMNIROUTE_BASE_URL,
-    apiKey: process.env.OMNIROUTE_API_KEY,
-    models: ['kr/claude-sonnet-4.5'],
-  },
-];
+// Helper functions
+function generateApiKey() {
+  return `rtr_${crypto.randomBytes(32).toString('hex')}`;
+}
 
-const providers = providerDefinitions
-  .filter((provider) => provider.apiKey && provider.baseUrl)
-  .map((provider) => ({
-    ...provider,
-    baseUrl: provider.baseUrl.replace(/\/$/, ''),
-  }));
+function hashKey(key) {
+  return crypto.createHash('sha256').update(key).digest('hex');
+}
 
-// Public model aliases can fall back to equivalent models at another provider.
-const modelRoutes = {
-  'orbit-auto': [
-    ['fishappedu', 'gpt-5.6-sol'],
-    ['openrouter', 'openai/gpt-5.6-sol'],
-  ],
-  'gpt-5.6-sol': [
-    ['fishappedu', 'gpt-5.6-sol'],
-    ['openrouter', 'openai/gpt-5.6-sol'],
-  ],
-  'gpt-5.5': [['fishappedu', 'gpt-5.5']],
-  'openai/gpt-oss-120b': [['openrouter', 'openai/gpt-oss-120b']],
-  'openai/gpt-5.6-luna-pro': [['openrouter', 'openai/gpt-5.6-luna-pro']],
-  'openai/gpt-5.6-sol': [
-    ['openrouter', 'openai/gpt-5.6-sol'],
-    ['fishappedu', 'gpt-5.6-sol'],
-  ],
-  'anthropic/claude-fable-5': [['openrouter', 'anthropic/claude-fable-5']],
-  'anthropic/claude-sonnet-5': [['openrouter', 'anthropic/claude-sonnet-5']],
-  'kr/claude-sonnet-4.5': [['omniroute', 'kr/claude-sonnet-4.5']],
-};
-
-function parseAccessKeys() {
-  if (process.env.ROUTER_KEYS_JSON) {
-    try {
-      const records = JSON.parse(process.env.ROUTER_KEYS_JSON);
-      if (!Array.isArray(records)) throw new Error('value must be an array');
-      return records
-        .filter((record) => record && record.key)
-        .map((record) => ({
-          name: record.name || 'user',
-          key: String(record.key),
-          rpm: Math.max(1, Number(record.rpm || 60)),
-          models: Array.isArray(record.models) ? record.models : null,
-        }));
-    } catch (error) {
-      console.error(`Invalid ROUTER_KEYS_JSON: ${error.message}`);
+function requireAuth(req, res, next) {
+  if (req.session && req.session.userId) {
+    const user = db.get('users').find({ id: req.session.userId }).value();
+    if (user) {
+      req.user = user;
+      return next();
     }
   }
-
-  return (process.env.ROUTER_API_KEYS || '')
-    .split(',')
-    .map((key) => key.trim())
-    .filter(Boolean)
-    .map((key, index) => ({ name: `user-${index + 1}`, key, rpm: 60, models: null }));
+  return res.status(401).json({ error: 'Authentication required' });
 }
 
-const accessKeys = parseAccessKeys();
-const rateWindows = new Map();
-const stats = {
-  total: 0,
-  success: 0,
-  failed: 0,
-  inputTokens: 0,
-  outputTokens: 0,
-  byProvider: {},
-  recent: [],
-};
-
-function safeEqual(left, right) {
-  const leftBuffer = Buffer.from(left || '');
-  const rightBuffer = Buffer.from(right || '');
-  return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
-}
-
-function authenticate(req, res, next) {
-  const header = req.get('authorization') || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
-  const record = accessKeys.find((candidate) => safeEqual(candidate.key, token));
-
-  if (!record) {
-    return res.status(401).json({
-      error: { message: 'Invalid router API key', type: 'authentication_error' },
-    });
+function getProviderConfig(userId) {
+  const accounts = db.get('connected_accounts')
+    .filter({ user_id: userId, is_active: true })
+    .value();
+  
+  const providers = [];
+  
+  for (const account of accounts) {
+    switch (account.provider) {
+      case 'openai':
+        providers.push({ id: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: account.api_key, models: ['gpt-4o', 'gpt-4o-mini', 'gpt-3.5-turbo', 'gpt-4', 'gpt-4-turbo'] });
+        break;
+      case 'openrouter':
+        providers.push({
+          id: 'openrouter', baseUrl: 'https://openrouter.ai/api/v1', apiKey: account.api_key,
+          models: ['openai/gpt-oss-120b', 'openai/gpt-5.6-luna-pro', 'openai/gpt-5.6-sol', 'anthropic/claude-fable-5', 'anthropic/claude-sonnet-5', 'anthropic/claude-3.5-sonnet', 'google/gemini-2.0-flash-001'],
+          headers: { 'HTTP-Referer': BASE_URL, 'X-Title': 'Orbit Router' }
+        });
+        break;
+      case 'fishappedu':
+        providers.push({ id: 'fishappedu', baseUrl: 'https://fishappedu.online/v1', apiKey: account.api_key, models: ['gpt-5.6-sol', 'gpt-5.5'] });
+        break;
+      case 'kiro':
+        providers.push({ id: 'kiro', baseUrl: process.env.KIRO_BASE_URL || 'https://api.kiro.ai/v1', apiKey: account.api_key, models: process.env.KIRO_MODELS ? process.env.KIRO_MODELS.split(',') : ['kr/claude-sonnet-4.5', 'kr/gpt-4o'] });
+        break;
+      case 'omniroute':
+        providers.push({ id: 'omniroute', baseUrl: process.env.OMNIROUTE_BASE_URL || 'http://localhost:20128/v1', apiKey: account.api_key, models: ['kr/claude-sonnet-4.5'] });
+        break;
+    }
   }
+  
+  return providers;
+}
 
-  const now = Date.now();
-  const hash = crypto.createHash('sha256').update(record.key).digest('hex').slice(0, 16);
-  const window = rateWindows.get(hash);
-  if (!window || now - window.startedAt >= 60_000) {
-    rateWindows.set(hash, { startedAt: now, count: 1 });
-  } else if (window.count >= record.rpm) {
-    res.set('Retry-After', String(Math.ceil((60_000 - (now - window.startedAt)) / 1000)));
-    return res.status(429).json({
-      error: { message: `Rate limit exceeded (${record.rpm} requests/minute)`, type: 'rate_limit_error' },
-    });
-  } else {
-    window.count += 1;
+// Auth routes
+app.post('/auth/register', (req, res) => {
+  const { email, password, name } = req.body;
+  
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
   }
-
-  req.routerUser = { ...record, key: undefined, hash };
-  return next();
-}
-
-function verifyAdmin(req, res, next) {
-  const adminKey = process.env.ADMIN_KEY;
-  if (!adminKey || !safeEqual(req.get('x-admin-key'), adminKey)) {
-    return res.status(403).json({ error: 'Admin access required' });
+  
+  if (password.length < 6) {
+    return res.status(400).json({ error: 'Password must be at least 6 characters' });
   }
-  return next();
-}
-
-function availableRoutes(model) {
-  const configured = new Map(providers.map((provider) => [provider.id, provider]));
-  return (modelRoutes[model] || [])
-    .map(([providerId, upstreamModel]) => ({ provider: configured.get(providerId), upstreamModel }))
-    .filter((route) => route.provider);
-}
-
-function recordRequest(entry) {
-  stats.total += 1;
-  stats[entry.status === 'success' ? 'success' : 'failed'] += 1;
-  stats.inputTokens += entry.inputTokens || 0;
-  stats.outputTokens += entry.outputTokens || 0;
-
-  const providerStats = stats.byProvider[entry.provider] || { total: 0, success: 0, failed: 0 };
-  providerStats.total += 1;
-  providerStats[entry.status === 'success' ? 'success' : 'failed'] += 1;
-  stats.byProvider[entry.provider] = providerStats;
-
-  stats.recent.unshift({ ...entry, at: new Date().toISOString() });
-  stats.recent.length = Math.min(stats.recent.length, 100);
-}
-
-async function callProvider(route, body, signal) {
-  return fetch(`${route.provider.baseUrl}/chat/completions`, {
-    method: 'POST',
-    signal,
-    headers: {
-      Authorization: `Bearer ${route.provider.apiKey}`,
-      'Content-Type': 'application/json',
-      ...(route.provider.headers || {}),
-    },
-    body: JSON.stringify({ ...body, model: route.upstreamModel }),
-  });
-}
-
-app.get('/', (req, res) => {
+  
+  const existing = db.get('users').find({ email: email.toLowerCase() }).value();
+  if (existing) {
+    return res.status(400).json({ error: 'Email already registered' });
+  }
+  
+  const { salt, hash } = hashPassword(password);
+  
+  const newUser = {
+    id: getNextId('users'),
+    email: email.toLowerCase(),
+    name: name || email.split('@')[0],
+    password_salt: salt,
+    password_hash: hash,
+    created_at: new Date().toISOString(),
+    last_login: new Date().toISOString()
+  };
+  
+  db.get('users').push(newUser).write();
+  
+  req.session.userId = newUser.id;
+  
   res.json({
-    name: 'Orbit Router',
-    status: 'online',
-    docs: '/v1/models',
-    dashboard: '/dashboard',
+    success: true,
+    user: { id: newUser.id, email: newUser.email, name: newUser.name }
   });
 });
 
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', providers: providers.map((provider) => provider.id) });
+app.post('/auth/login', (req, res) => {
+  const { email, password } = req.body;
+  
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
+  }
+  
+  const user = db.get('users').find({ email: email.toLowerCase() }).value();
+  
+  if (!user || !user.password_hash) {
+    return res.status(401).json({ error: 'Invalid email or password' });
+  }
+  
+  if (!verifyPassword(password, user.password_salt, user.password_hash)) {
+    return res.status(401).json({ error: 'Invalid email or password' });
+  }
+  
+  db.get('users').find({ id: user.id }).assign({ last_login: new Date().toISOString() }).write();
+  
+  req.session.userId = user.id;
+  
+  res.json({
+    success: true,
+    user: { id: user.id, email: user.email, name: user.name }
+  });
 });
 
-app.get('/v1/models', authenticate, (req, res) => {
-  const models = Object.keys(modelRoutes)
-    .filter((model) => availableRoutes(model).length > 0)
-    .filter((model) => !req.routerUser.models || req.routerUser.models.includes(model))
-    .map((id) => ({ id, object: 'model', created: Math.floor(startedAt / 1000), owned_by: 'orbit-router' }));
+app.post('/auth/logout', (req, res) => {
+  req.session.destroy(() => {
+    res.json({ success: true });
+  });
+});
+
+app.get('/auth/status', (req, res) => {
+  if (req.session && req.session.userId) {
+    const user = db.get('users').find({ id: req.session.userId }).value();
+    if (user) {
+      return res.json({
+        authenticated: true,
+        user: { id: user.id, email: user.email, name: user.name }
+      });
+    }
+  }
+  res.json({ authenticated: false });
+});
+
+// Pages
+app.get('/', (req, res) => {
+  if (req.session && req.session.userId) {
+    return res.redirect('/dashboard');
+  }
+  res.sendFile(path.join(__dirname, 'public', 'landing.html'));
+});
+
+app.get('/dashboard', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
+});
+
+// API Key management
+app.get('/api/keys', requireAuth, (req, res) => {
+  const keys = db.get('api_keys').filter({ user_id: req.user.id }).sortBy('created_at').reverse().value()
+    .map(k => ({ id: k.id, name: k.name, key_prefix: k.key_prefix, is_active: k.is_active, created_at: k.created_at, last_used_at: k.last_used_at }));
+  res.json(keys);
+});
+
+app.post('/api/keys', requireAuth, (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'Name is required' });
+  const rawKey = generateApiKey();
+  const keyHash = hashKey(rawKey);
+  const keyPrefix = rawKey.slice(0, 12) + '...';
+  const newKey = { id: getNextId('api_keys'), user_id: req.user.id, name, key_hash: keyHash, key_prefix: keyPrefix, is_active: true, created_at: new Date().toISOString(), last_used_at: null };
+  db.get('api_keys').push(newKey).write();
+  res.json({ id: newKey.id, name, key: rawKey, key_prefix: keyPrefix, created_at: newKey.created_at });
+});
+
+app.delete('/api/keys/:id', requireAuth, (req, res) => {
+  const key = db.get('api_keys').find({ id: parseInt(req.params.id), user_id: req.user.id }).value();
+  if (!key) return res.status(404).json({ error: 'Key not found' });
+  db.get('api_keys').remove({ id: parseInt(req.params.id) }).write();
+  res.json({ success: true });
+});
+
+app.put('/api/keys/:id/toggle', requireAuth, (req, res) => {
+  const key = db.get('api_keys').find({ id: parseInt(req.params.id), user_id: req.user.id }).value();
+  if (!key) return res.status(404).json({ error: 'Key not found' });
+  db.get('api_keys').find({ id: parseInt(req.params.id) }).assign({ is_active: !key.is_active }).write();
+  res.json({ success: true });
+});
+
+// Connected accounts
+app.get('/api/accounts', requireAuth, (req, res) => {
+  const accounts = db.get('connected_accounts').filter({ user_id: req.user.id }).value();
+  res.json(accounts);
+});
+
+app.post('/api/accounts', requireAuth, (req, res) => {
+  const { provider, api_key } = req.body;
+  const validProviders = ['openai', 'kiro', 'fishappedu', 'openrouter', 'omniroute'];
+  if (!provider || !validProviders.includes(provider)) return res.status(400).json({ error: `Invalid provider. Valid: ${validProviders.join(', ')}` });
+  if (!api_key) return res.status(400).json({ error: 'API key is required' });
+  
+  const existing = db.get('connected_accounts').find({ user_id: req.user.id, provider }).value();
+  if (existing) {
+    db.get('connected_accounts').find({ user_id: req.user.id, provider }).assign({ api_key, is_active: true, updated_at: new Date().toISOString() }).write();
+  } else {
+    db.get('connected_accounts').push({ id: getNextId('connected_accounts'), user_id: req.user.id, provider, api_key, is_active: true, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }).write();
+  }
+  res.json({ success: true, provider });
+});
+
+app.delete('/api/accounts/:provider', requireAuth, (req, res) => {
+  const result = db.get('connected_accounts').remove({ user_id: req.user.id, provider: req.params.provider }).write();
+  if (!result || result.length === 0) return res.status(404).json({ error: 'Account not found' });
+  res.json({ success: true });
+});
+
+app.put('/api/accounts/:provider/toggle', requireAuth, (req, res) => {
+  const account = db.get('connected_accounts').find({ user_id: req.user.id, provider: req.params.provider }).value();
+  if (!account) return res.status(404).json({ error: 'Account not found' });
+  db.get('connected_accounts').find({ user_id: req.user.id, provider: req.params.provider }).assign({ is_active: !account.is_active, updated_at: new Date().toISOString() }).write();
+  res.json({ success: true });
+});
+
+// Models
+app.get('/api/models', requireAuth, (req, res) => {
+  const providers = getProviderConfig(req.user.id);
+  const models = [];
+  for (const provider of providers) {
+    for (const model of provider.models) {
+      models.push({ id: model, provider: provider.id, object: 'model', created: Math.floor(Date.now() / 1000), owned_by: provider.id });
+    }
+  }
   res.json({ object: 'list', data: models });
 });
 
-app.post('/v1/chat/completions', authenticate, async (req, res) => {
-  const { model, messages, stream = false, ...parameters } = req.body || {};
-  if (!model || !Array.isArray(messages)) {
-    return res.status(400).json({
-      error: { message: '`model` and `messages` are required', type: 'invalid_request_error' },
-    });
+// Stats
+app.get('/api/stats', requireAuth, (req, res) => {
+  const userStats = db.get('usage_stats').filter({ user_id: req.user.id }).value();
+  const totalReqs = userStats.length;
+  const successReqs = userStats.filter(s => s.status === 'success').length;
+  const totalTokens = userStats.reduce((sum, s) => sum + (s.input_tokens || 0) + (s.output_tokens || 0), 0);
+  const byProvider = {};
+  for (const stat of userStats) {
+    if (!byProvider[stat.provider]) byProvider[stat.provider] = { requests: 0, tokens: 0 };
+    byProvider[stat.provider].requests += 1;
+    byProvider[stat.provider].tokens += (stat.input_tokens || 0) + (stat.output_tokens || 0);
   }
-  if (req.routerUser.models && !req.routerUser.models.includes(model)) {
-    return res.status(403).json({
-      error: { message: 'This API key cannot use the requested model', type: 'permission_error' },
-    });
-  }
+  const recent = db.get('usage_stats').filter({ user_id: req.user.id }).sortBy('created_at').reverse().take(50).value();
+  res.json({ total_requests: totalReqs, successful_requests: successReqs, total_tokens: totalTokens, by_provider: byProvider, recent });
+});
 
-  const routes = availableRoutes(model);
-  if (routes.length === 0) {
-    return res.status(404).json({
-      error: { message: `Model is unavailable: ${model}`, type: 'invalid_request_error' },
-    });
+// Chat completions proxy
+app.post('/v1/chat/completions', async (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+  if (!token) return res.status(401).json({ error: { message: 'API key required', type: 'authentication_error' } });
+  
+  const keyHash = hashKey(token);
+  const apiKeyRecord = db.get('api_keys').find({ key_hash: keyHash, is_active: true }).value();
+  if (!apiKeyRecord) return res.status(401).json({ error: { message: 'Invalid API key', type: 'authentication_error' } });
+  
+  db.get('api_keys').find({ id: apiKeyRecord.id }).assign({ last_used_at: new Date().toISOString() }).write();
+  
+  const { model, messages, stream = false, ...rest } = req.body;
+  if (!model || !Array.isArray(messages)) return res.status(400).json({ error: { message: 'model and messages are required', type: 'invalid_request_error' } });
+  
+  const providers = getProviderConfig(apiKeyRecord.user_id);
+  if (providers.length === 0) return res.status(400).json({ error: { message: 'No connected accounts. Please add API keys in dashboard.', type: 'configuration_error' } });
+  
+  let selectedProvider = null;
+  for (const provider of providers) {
+    if (provider.models.includes(model)) { selectedProvider = provider; break; }
   }
-
+  if (!selectedProvider) return res.status(400).json({ error: { message: `Model "${model}" not available. Connect an account that supports this model.`, type: 'invalid_request_error' } });
+  
+  const startTime = Date.now();
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), Number(process.env.REQUEST_TIMEOUT_MS || 180_000));
+  const timeout = setTimeout(() => controller.abort(), 120000);
   req.on('aborted', () => controller.abort());
-  res.on('close', () => {
-    if (!res.writableEnded) controller.abort();
-  });
-  const failures = [];
-
+  res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+  
   try {
-    for (const route of routes) {
-      const attemptStartedAt = Date.now();
-      try {
-        const upstream = await callProvider(route, { messages, stream: Boolean(stream), ...parameters }, controller.signal);
-        if (!upstream.ok) {
-          const detail = await upstream.text();
-          failures.push(`${route.provider.id}: HTTP ${upstream.status}`);
-          recordRequest({
-            user: req.routerUser.name,
-            provider: route.provider.id,
-            model: route.upstreamModel,
-            status: 'failed',
-            statusCode: upstream.status,
-            latencyMs: Date.now() - attemptStartedAt,
-          });
-          console.warn(`Provider failed: ${route.provider.id} ${upstream.status} ${detail.slice(0, 300)}`);
-          continue;
-        }
-
-        res.set('x-orbit-provider', route.provider.id);
-        res.set('x-orbit-model', route.upstreamModel);
-
-        if (stream) {
-          res.status(200);
-          res.set('Content-Type', upstream.headers.get('content-type') || 'text/event-stream; charset=utf-8');
-          res.set('Cache-Control', 'no-cache, no-transform');
-          res.set('Connection', 'keep-alive');
-          res.flushHeaders();
-
-          const reader = upstream.body.getReader();
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            res.write(Buffer.from(value));
-          }
-          res.end();
-          recordRequest({
-            user: req.routerUser.name,
-            provider: route.provider.id,
-            model: route.upstreamModel,
-            status: 'success',
-            streaming: true,
-            latencyMs: Date.now() - attemptStartedAt,
-          });
-          return;
-        }
-
-        const data = await upstream.json();
-        const usage = data.usage || {};
-        recordRequest({
-          user: req.routerUser.name,
-          provider: route.provider.id,
-          model: route.upstreamModel,
-          status: 'success',
-          inputTokens: usage.prompt_tokens || usage.input_tokens || 0,
-          outputTokens: usage.completion_tokens || usage.output_tokens || 0,
-          latencyMs: Date.now() - attemptStartedAt,
-        });
-        return res.json(data);
-      } catch (error) {
-        if (controller.signal.aborted) throw error;
-        failures.push(`${route.provider.id}: ${error.message}`);
-        recordRequest({
-          user: req.routerUser.name,
-          provider: route.provider.id,
-          model: route.upstreamModel,
-          status: 'failed',
-          latencyMs: Date.now() - attemptStartedAt,
-        });
-      }
-    }
-
-    return res.status(502).json({
-      error: { message: `All routes failed: ${failures.join('; ')}`, type: 'upstream_error' },
+    const response = await fetch(`${selectedProvider.baseUrl}/chat/completions`, {
+      method: 'POST', signal: controller.signal,
+      headers: { 'Authorization': `Bearer ${selectedProvider.apiKey}`, 'Content-Type': 'application/json', ...(selectedProvider.headers || {}) },
+      body: JSON.stringify({ model, messages, stream, ...rest })
     });
-  } catch (error) {
-    if (!res.headersSent) {
-      return res.status(controller.signal.aborted ? 504 : 502).json({
-        error: { message: controller.signal.aborted ? 'Request timed out' : error.message, type: 'upstream_error' },
-      });
+    
+    const logEntry = { id: getNextId('usage_stats'), user_id: apiKeyRecord.user_id, api_key_id: apiKeyRecord.id, provider: selectedProvider.id, model, input_tokens: 0, output_tokens: 0, status: 'error', latency_ms: Date.now() - startTime, created_at: new Date().toISOString() };
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      logEntry.status = 'error';
+      db.get('usage_stats').push(logEntry).write();
+      return res.status(response.status).json({ error: { message: `Provider error: ${errorText.slice(0, 500)}`, type: 'provider_error' } });
     }
-    return res.end();
+    
+    if (stream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) { const { done, value } = await reader.read(); if (done) break; res.write(decoder.decode(value, { stream: true })); }
+      res.end();
+      logEntry.status = 'success';
+      db.get('usage_stats').push(logEntry).write();
+    } else {
+      const data = await response.json();
+      const usage = data.usage || {};
+      logEntry.input_tokens = usage.prompt_tokens || 0;
+      logEntry.output_tokens = usage.completion_tokens || 0;
+      logEntry.status = 'success';
+      db.get('usage_stats').push(logEntry).write();
+      return res.json(data);
+    }
+  } catch (error) {
+    db.get('usage_stats').push({ id: getNextId('usage_stats'), user_id: apiKeyRecord.user_id, api_key_id: apiKeyRecord.id, provider: selectedProvider.id, model, input_tokens: 0, output_tokens: 0, status: 'error', latency_ms: Date.now() - startTime, created_at: new Date().toISOString() }).write();
+    if (!res.headersSent) return res.status(502).json({ error: { message: error.message, type: 'upstream_error' } });
   } finally {
     clearTimeout(timeout);
   }
 });
 
-app.get('/admin/stats', verifyAdmin, (req, res) => {
-  res.json({
-    uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
-    configuredProviders: providers.map((provider) => provider.id),
-    users: accessKeys.map(({ name, rpm, models }) => ({ name, rpm, models: models || 'all' })),
-    ...stats,
-  });
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-app.get('/dashboard', (req, res) => {
-  res.type('html').send(`<!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Orbit Router</title>
-<style>*{box-sizing:border-box}body{margin:0;background:#0d0f14;color:#eef0f6;font:14px/1.5 system-ui}.shell{max-width:1050px;margin:auto;padding:32px 20px}h1{font-size:28px}.login,.card{background:#171a22;border:1px solid #292e3b;border-radius:15px;padding:20px;margin:16px 0}.row{display:flex;gap:10px}input{flex:1;padding:11px;border:1px solid #343a49;border-radius:9px;background:#101218;color:#fff}button{padding:11px 17px;border:0;border-radius:9px;background:#7656ff;color:#fff;font-weight:700;cursor:pointer}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.stat{background:#101218;border-radius:11px;padding:15px}.stat b{display:block;font-size:23px}.muted{color:#929aaa}pre{white-space:pre-wrap;overflow-wrap:anywhere}table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:9px;border-bottom:1px solid #292e3b}@media(max-width:600px){.row{flex-direction:column}}</style></head>
-<body><main class="shell"><h1>Orbit Router</h1><p class="muted">Статистика хранится в памяти и сбрасывается при перезапуске бесплатного Render instance.</p><section class="login"><div class="row"><input id="key" type="password" placeholder="ADMIN_KEY"><button id="load">Открыть dashboard</button></div><p id="error" style="color:#ff7180"></p></section><section id="content" hidden><div class="grid" id="summary"></div><div class="card"><h2>Провайдеры</h2><pre id="providers"></pre></div><div class="card"><h2>Последние запросы</h2><div style="overflow:auto"><table><thead><tr><th>Время</th><th>Пользователь</th><th>Провайдер</th><th>Модель</th><th>Статус</th><th>мс</th></tr></thead><tbody id="recent"></tbody></table></div></div></section></main>
-<script>const e=id=>document.getElementById(id);e('key').value=sessionStorage.getItem('orbit-admin-key')||'';e('load').onclick=load;async function load(){e('error').textContent='';const key=e('key').value;const r=await fetch('/admin/stats',{headers:{'x-admin-key':key}});if(!r.ok){e('error').textContent='Неверный ADMIN_KEY';return}sessionStorage.setItem('orbit-admin-key',key);const d=await r.json();e('content').hidden=false;e('summary').innerHTML=[['Запросы',d.total],['Успешно',d.success],['Ошибки',d.failed],['Токены',d.inputTokens+d.outputTokens]].map(x=>'<div class="stat"><span class="muted">'+x[0]+'</span><b>'+x[1]+'</b></div>').join('');e('providers').textContent=JSON.stringify(d.byProvider,null,2);e('recent').innerHTML=d.recent.map(x=>'<tr><td>'+new Date(x.at).toLocaleString()+'</td><td>'+x.user+'</td><td>'+x.provider+'</td><td>'+x.model+'</td><td>'+x.status+'</td><td>'+x.latencyMs+'</td></tr>').join('')}if(e('key').value)load();</script></body></html>`);
-});
-
-app.use((error, req, res, next) => {
-  if (res.headersSent) return next(error);
-  return res.status(error.message.includes('CORS') ? 403 : 500).json({
-    error: { message: error.message, type: 'router_error' },
-  });
-});
-
-app.listen(port, '0.0.0.0', () => {
-  console.log(`Orbit Router listening on http://0.0.0.0:${port}`);
-  console.log(`Configured providers: ${providers.map((provider) => provider.id).join(', ') || 'none'}`);
-  console.log(`Configured user keys: ${accessKeys.length}`);
+// Start server
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Orbit Router running on ${BASE_URL}`);
 });

@@ -1,0 +1,28 @@
+{
+  "name": "orbit-router",
+  "version": "1.0.0",
+  "description": "AI Router with email auth, account connections, and API key management",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-session": "^1.18.0",
+    "lowdb": "^1.0.0"
+  },
+  "keywords": [
+    "ai",
+    "router",
+    "openai",
+    "proxy",
+    "fallback"
+  ],
+  "license": "MIT"
+}
